@@ -381,3 +381,24 @@ func OnRequestHook(f func(ctx context.Context, s network.Stream, req *pb.Message
 		return nil
 	}
 }
+
+// H3Location configures the node's actual geographic location for H3 cell computation.
+// This sets the h3_actual cell at resolution 12 (~100m precision).
+// The h3_public cell will be automatically computed at resolution 7 (~5km precision).
+func H3Location(latitude, longitude float64) Option {
+	return func(c *dhtcfg.Config) error {
+		c.H3Latitude = latitude
+		c.H3Longitude = longitude
+		return nil
+	}
+}
+
+// KAnonymity configures the target k value for k-anonymity privacy guarantee.
+// The h3_public cell must contain at least k nodes to maintain anonymity.
+// Defaults to 50.
+func KAnonymity(k int) Option {
+	return func(c *dhtcfg.Config) error {
+		c.KAnonymity = k
+		return nil
+	}
+}

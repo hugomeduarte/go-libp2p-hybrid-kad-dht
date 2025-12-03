@@ -74,6 +74,11 @@ type Config struct {
 
 	EnableOptimisticProvide       bool
 	OptimisticProvideJobsPoolSize int
+
+	// H3 geospatial configuration for dual identity
+	H3Latitude   float64 // Latitude for H3 cell computation
+	H3Longitude  float64 // Longitude for H3 cell computation
+	KAnonymity   int     // Target k value for k-anonymity (default: 50)
 }
 
 func EmptyQueryFilter(_ interface{}, ai peer.AddrInfo) bool { return true }
@@ -137,6 +142,9 @@ var Defaults = func(o *Config) error {
 
 	// MAGIC: It makes sense to set it to a multiple of OptProvReturnRatio * BucketSize. We chose a multiple of 4.
 	o.OptimisticProvideJobsPoolSize = 60
+
+	// Default k-anonymity value
+	o.KAnonymity = 50
 
 	return nil
 }
