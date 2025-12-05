@@ -78,7 +78,13 @@ type Config struct {
 	// H3 geospatial configuration for dual identity
 	H3Latitude   float64 // Latitude for H3 cell computation
 	H3Longitude  float64 // Longitude for H3 cell computation
+	H3Resolution int     // Public H3 resolution (default: 7, ~5km precision)
 	KAnonymity   int     // Target k value for k-anonymity (default: 50)
+
+	// H3 Geographic Awareness for Hybrid Routing
+	H3Enabled bool    // Whether H3 is enabled
+	H3Alpha   float64 // Weight for XOR distance (default: 0.6)
+	H3Beta    float64 // Weight for geographic distance (default: 0.4)
 }
 
 func EmptyQueryFilter(_ interface{}, ai peer.AddrInfo) bool { return true }
@@ -145,6 +151,12 @@ var Defaults = func(o *Config) error {
 
 	// Default k-anonymity value
 	o.KAnonymity = 50
+
+	// H3 defaults (disabled by default)
+	o.H3Enabled = false
+	o.H3Resolution = 7 // Default resolution 7 (~5km precision)
+	o.H3Alpha = 0.6
+	o.H3Beta = 0.4
 
 	return nil
 }

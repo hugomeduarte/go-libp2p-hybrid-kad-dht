@@ -174,6 +174,13 @@ type IpfsDHT struct {
 	h3Actual  h3.Cell // H3 cell at resolution 12 (actual location, ~100m precision)
 	h3Public  h3.Cell // H3 cell at resolution 7 (published, ~5km precision)
 	kAnonymity int    // target k value for k-anonymity (default: 50)
+
+	// H3 Geographic Awareness for Hybrid Routing
+	h3Enabled    bool                  // Whether H3 is enabled
+	h3PeerStore  map[peer.ID]h3.Cell  // Map peer → H3 public cell (stores peer locations)
+	h3Mutex      sync.RWMutex          // Protects h3PeerStore map
+	h3Alpha      float64               // Weight for XOR distance in hybrid calculation (default: 0.6)
+	h3Beta        float64               // Weight for geographic distance in hybrid calculation (default: 0.4)
 }
 
 // Assert that IPFS assumptions about interfaces aren't broken. These aren't a
@@ -327,6 +334,10 @@ func makeDHT(ctx context.Context, h host.Host, cfg dhtcfg.Config) (*IpfsDHT, err
 		enableOptProv:   cfg.EnableOptimisticProvide,
 		optProvJobsPool: nil,
 		kAnonymity:      cfg.KAnonymity,
+		h3Enabled:        cfg.H3Enabled,
+		h3PeerStore:      make(map[peer.ID]h3.Cell),
+		h3Alpha:          cfg.H3Alpha,
+		h3Beta:           cfg.H3Beta,
 	}
 
 	// Initialize H3 dual identity if location is provided
@@ -338,12 +349,17 @@ func makeDHT(ctx context.Context, h host.Host, cfg dhtcfg.Config) (*IpfsDHT, err
 		}
 		dht.h3Actual = h3Actual
 
-		// Compute h3_public from h3_actual (resolution 12 -> 7)
-		h3Public, err := h3Actual.Parent(7) // Resolution 7: ~5km precision
+		// Compute h3_public from h3_actual using configured resolution (default: 7)
+		resolution := cfg.H3Resolution
+		if resolution == 0 {
+			resolution = 7 // Default to 7 if not set
+		}
+		h3Public, err := h3Actual.Parent(resolution)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compute H3 public cell: %w", err)
 		}
 		dht.h3Public = h3Public
+		dht.h3Enabled = true
 
 		// Note: ensureKAnonymity will be called after routing table is populated
 		// to verify the privacy guarantee. This is done asynchronously since it
@@ -1098,4 +1114,87 @@ func (dht *IpfsDHT) countNodesInH3Cell(ctx context.Context, h3Cell h3.Cell) int 
 	// In practice, this would be implemented by querying the DHT for nodes
 	// that advertise the same h3_public cell
 	return count
+}
+
+// Hybrid distance calculation functions for location-aware routing
+
+// hybridDistance calculates a combined distance using both XOR (network topology)
+// and geographic (H3 cell) distance. This enables location-aware routing decisions.
+// Returns: alpha × XOR_distance + beta × geo_distance
+func (dht *IpfsDHT) hybridDistance(peerID peer.ID, targetKey string) float64 {
+	if !dht.h3Enabled {
+		// H3 disabled, use only XOR distance (normal Kademlia behavior)
+		return dht.xorDistanceNormalized(peerID, targetKey)  //TODO: MAYBE REMOVE SINCE IF NOT ENABLED CAN USE DEFAULT KAMDELIA
+	}
+
+	// XOR component (network topology distance)
+	xorDist := dht.xorDistanceNormalized(peerID, targetKey)
+
+	// Geographic component (H3 cell distance)
+	geoDist := 0.5 // Default if no H3 info available
+	dht.h3Mutex.RLock()
+	if peerCell, ok := dht.h3PeerStore[peerID]; ok && dht.h3Public != 0 {
+		dist, err := dht.h3Public.GridDistance(peerCell)
+		if err == nil && dist < 10000 {
+			// Normalize: closer cells = smaller distance (0-1 range)
+			geoDist = float64(dist) / 10000.0
+		}
+	}
+	dht.h3Mutex.RUnlock()
+
+	// Weighted combination: hybrid = alpha×XOR + beta×geo
+	return dht.h3Alpha*xorDist + dht.h3Beta*geoDist
+}
+
+// xorDistanceNormalized converts Kademlia's XOR distance to a normalized value [0, 1].
+// 0 = very far, 1 = very close (based on common prefix length).
+func (dht *IpfsDHT) xorDistanceNormalized(peerID peer.ID, targetKey string) float64 {
+	peerKadID := kb.ConvertPeerID(peerID)
+	targetKadID := kb.ConvertKey(targetKey)
+
+	// Calculate common prefix length (CPL) - how many leading bits match
+	// Higher CPL = closer in keyspace
+	cpl := kb.CommonPrefixLen(peerKadID, targetKadID)
+
+	// Normalize: more common prefix = closer (higher value)
+	// 256-bit keyspace, so max CPL = 256
+	return float64(cpl) / 256.0
+}
+
+// StoreH3Cell stores a peer's H3 public cell in the peer store.
+// This is called when we learn about a peer's location (from protocol messages, queries, etc.).
+func (dht *IpfsDHT) StoreH3Cell(p peer.ID, cell h3.Cell) {
+	if !dht.h3Enabled || cell == 0 {
+		return
+	}
+
+	dht.h3Mutex.Lock()
+	defer dht.h3Mutex.Unlock()
+
+	dht.h3PeerStore[p] = cell
+	logger.Debugw("stored peer H3 cell", "peer", p, "h3_cell", cell)
+}
+
+// GetH3Cell retrieves a peer's H3 public cell from the peer store.
+// Returns (cell, true) if found, (0, false) if not found or H3 disabled.
+func (dht *IpfsDHT) GetH3Cell(p peer.ID) (h3.Cell, bool) {
+	if !dht.h3Enabled {
+		return h3.Cell(0), false
+	}
+
+	dht.h3Mutex.RLock()
+	defer dht.h3Mutex.RUnlock()
+
+	cell, ok := dht.h3PeerStore[p]
+	return cell, ok
+}
+
+// IsH3Enabled returns whether H3 geographic awareness is enabled.
+func (dht *IpfsDHT) IsH3Enabled() bool {
+	return dht.h3Enabled
+}
+
+// GetH3Weights returns the current alpha (XOR) and beta (geographic) weights.
+func (dht *IpfsDHT) GetH3Weights() (alpha, beta float64) {
+	return dht.h3Alpha, dht.h3Beta
 }
