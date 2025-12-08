@@ -93,6 +93,9 @@ func (dht *IpfsDHT) handleNewMessage(s network.Stream) bool {
 			dht.onRequestHook(ctx, s, &req)
 		}
 
+		// Extract H3 information from incoming message
+		dht.extractH3FromMessage(&req)
+
 		handler := dht.handlerForMsgType(req.GetType())
 		if handler == nil {
 			metrics.RecordMessageHandleErr(ctx)

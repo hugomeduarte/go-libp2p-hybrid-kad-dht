@@ -3,6 +3,7 @@ package dht
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/uber/h3-go/v4"
@@ -133,3 +134,91 @@ func TestH3StoreAndRetrievePeerCell(t *testing.T) {
 	require.Equal(t, testCell, retrievedCell, "Retrieved cell should match stored cell")
 }
 
+func TestCountNodesInH3Cell(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Create main DHT in Lisboa
+	lisboaLat, lisbaLon := 38.7223, -9.1393
+	dht1 := setupDHT(ctx, t, false, H3Location(lisboaLat, lisbaLon))
+	require.True(t, dht1.IsH3Enabled())
+
+	// Get Lisboa's public cell (resolution 7)
+	lisboaCell := dht1.H3Public()
+	require.NotEqual(t, h3.Cell(0), lisboaCell, "Lisboa cell should not be zero")
+	t.Logf("Lisboa H3 Public Cell: %d (res %d)", lisboaCell, lisboaCell.Resolution())
+
+	// Test 1: Empty routing table should return 0
+	count := dht1.countNodesInH3Cell(ctx, lisboaCell)
+	require.Equal(t, 0, count, "Should return 0 when routing table is empty")
+
+	// Test 2: Create multiple DHTs in same area (Lisboa) and different area (New York)
+	dht2 := setupDHT(ctx, t, false, H3Location(38.7300, -9.1500))  // Near Lisboa
+	dht3 := setupDHT(ctx, t, false, H3Location(38.7100, -9.1300))  // Near Lisboa
+	dht4 := setupDHT(ctx, t, false, H3Location(40.7128, -74.0060)) // New York (different)
+
+	// Connect DHTs
+	connectNoSync(t, ctx, dht1, dht2)
+	connectNoSync(t, ctx, dht1, dht3)
+	connectNoSync(t, ctx, dht1, dht4)
+
+	// Wait for routing table updates
+	wait(t, ctx, dht1, dht2)
+	wait(t, ctx, dht1, dht3)
+	wait(t, ctx, dht1, dht4)
+
+	// Store H3 cells manually (simulating H3 info exchange)
+	// In real scenario, this happens via extractH3FromMessage
+	dht2Public := dht2.H3Public()
+	dht3Public := dht3.H3Public()
+	dht4Public := dht4.H3Public()
+
+	dht1.StoreH3Cell(dht2.PeerID(), dht2Public)
+	dht1.StoreH3Cell(dht3.PeerID(), dht3Public)
+	dht1.StoreH3Cell(dht4.PeerID(), dht4Public)
+
+	// Test 3: Count nodes in Lisboa cell
+	// Should count dht2 and dht3 (both near Lisboa), but not dht4 (New York)
+	count = dht1.countNodesInH3Cell(ctx, lisboaCell)
+	t.Logf("Count in Lisboa cell: %d", count)
+
+	// Verify dht2 and dht3 are in same cell (or child of Lisboa cell)
+	dht2Parent, err := dht2Public.Parent(7)
+	require.NoError(t, err)
+	dht3Parent, err := dht3Public.Parent(7)
+	require.NoError(t, err)
+
+	// Check if they match Lisboa cell
+	dht2InLisboa := (dht2Parent == lisboaCell) || (dht2Public == lisboaCell)
+	dht3InLisboa := (dht3Parent == lisboaCell) || (dht3Public == lisboaCell)
+
+	t.Logf("dht2 cell: %d (res %d), parent: %d, in Lisboa: %v", dht2Public, dht2Public.Resolution(), dht2Parent, dht2InLisboa)
+	t.Logf("dht3 cell: %d (res %d), parent: %d, in Lisboa: %v", dht3Public, dht3Public.Resolution(), dht3Parent, dht3InLisboa)
+	t.Logf("Lisboa cell: %d (res %d)", lisboaCell, lisboaCell.Resolution())
+
+	// Count how many should be in Lisboa cell
+	expectedCount := 0
+	if dht2InLisboa {
+		expectedCount++
+	}
+	if dht3InLisboa {
+		expectedCount++
+	}
+
+	t.Logf("Expected count in Lisboa cell: %d (dht2: %v, dht3: %v)", expectedCount, dht2InLisboa, dht3InLisboa)
+	require.Equal(t, expectedCount, count, "Count should match expected peers in Lisboa cell")
+
+	// Test 4: Count nodes in New York cell
+	nyCell := dht4Public
+	countNY := dht1.countNodesInH3Cell(ctx, nyCell)
+	t.Logf("Count in New York cell: %d (expected at least 1: dht4)", countNY)
+	if nyCell != 0 {
+		require.GreaterOrEqual(t, countNY, 1, "Should count dht4 in New York cell")
+	}
+
+	// Test 5: Test with zero cell
+	count = dht1.countNodesInH3Cell(ctx, h3.Cell(0))
+	require.Equal(t, 0, count, "Should return 0 for zero cell")
+
+	t.Logf("countNodesInH3Cell tests passed")
+}

@@ -1,0 +1,11 @@
+{
+  "go.goroot": "",
+  "go.gopath": "",
+  "go.toolsEnvVars": {
+    "PATH": "/opt/homebrew/bin:${env:PATH}"
+  },
+  "go.alternateTools": {
+    "go": "/opt/homebrew/bin/go"
+  }
+}
+

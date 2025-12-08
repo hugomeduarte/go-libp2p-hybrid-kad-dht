@@ -155,8 +155,8 @@ var Defaults = func(o *Config) error {
 	// H3 defaults (disabled by default)
 	o.H3Enabled = false
 	o.H3Resolution = 7 // Default resolution 7 (~5km precision)
-	o.H3Alpha = 0.6
-	o.H3Beta = 0.4
+	o.H3Alpha = 0.5    // Equal weight for XOR distance
+	o.H3Beta = 0.5     // Equal weight for geographic distance
 
 	return nil
 }

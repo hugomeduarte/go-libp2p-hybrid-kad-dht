@@ -241,7 +241,9 @@ type Message_Peer struct {
 	// multiaddrs for a given peer
 	Addrs [][]byte `protobuf:"bytes,2,rep,name=addrs,proto3" json:"addrs,omitempty"`
 	// used to signal the sender's connection capabilities to the peer
-	Connection    Message_ConnectionType `protobuf:"varint,3,opt,name=connection,proto3,enum=dht.pb.Message_ConnectionType" json:"connection,omitempty"`
+	Connection Message_ConnectionType `protobuf:"varint,3,opt,name=connection,proto3,enum=dht.pb.Message_ConnectionType" json:"connection,omitempty"`
+	// H3 public cell for geographic routing (optional, 0 if not provided)
+	H3PublicCell  uint64 `protobuf:"varint,4,opt,name=h3_public_cell,json=h3PublicCell,proto3" json:"h3_public_cell,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -295,6 +297,13 @@ func (x *Message_Peer) GetConnection() Message_ConnectionType {
 		return x.Connection
 	}
 	return Message_NOT_CONNECTED
+}
+
+func (x *Message_Peer) GetH3PublicCell() uint64 {
+	if x != nil {
+		return x.H3PublicCell
+	}
+	return 0
 }
 
 var File_github_com_libp2p_go_libp2p_kad_dht_pb_dht_proto protoreflect.FileDescriptor

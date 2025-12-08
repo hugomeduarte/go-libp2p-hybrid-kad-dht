@@ -41,6 +41,10 @@ message Message {
 
     // used to signal the sender's connection capabilities to the peer
     ConnectionType connection = 3;
+
+    // H3 public cell for geographic routing (optional, 0 if not provided)
+    // This is the node's public H3 cell at reduced resolution for privacy
+    uint64 h3_public_cell = 4;
   }
 
   // defines what type of message it is.

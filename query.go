@@ -165,8 +165,8 @@ func (dht *IpfsDHT) runQuery(ctx context.Context, target string, queryFn queryFn
 	defer span.End()
 
 	// pick the K closest peers to the key in our Routing table.
-	targetKadID := kb.ConvertKey(target)
-	seedPeers := dht.routingTable.NearestPeers(targetKadID, dht.bucketSize)
+	// Use hybrid distance if H3 is enabled, otherwise use standard XOR distance.
+	seedPeers := dht.getClosestPeersHybrid(target, dht.bucketSize)
 	if len(seedPeers) == 0 {
 		routing.PublishQueryEvent(ctx, &routing.QueryEvent{
 			Type:  routing.QueryError,

@@ -81,6 +81,7 @@ func (dht *IpfsDHT) handleGetValue(ctx context.Context, p peer.ID, pmes *pb.Mess
 		}
 
 		resp.CloserPeers = pb.PeerInfosToPBPeers(dht.host.Network(), closestInfos)
+		dht.addH3ToPBPeers(resp.CloserPeers)
 	}
 
 	return resp, nil
@@ -280,6 +281,7 @@ func (dht *IpfsDHT) handleFindPeer(ctx context.Context, from peer.ID, pmes *pb.M
 	}
 
 	resp.CloserPeers = pb.PeerInfosToPBPeers(dht.host.Network(), withAddresses)
+	dht.addH3ToPBPeers(resp.CloserPeers)
 	return resp, nil
 }
 
@@ -308,12 +310,14 @@ func (dht *IpfsDHT) handleGetProviders(ctx context.Context, p peer.ID, pmes *pb.
 	}
 
 	resp.ProviderPeers = pb.PeerInfosToPBPeers(dht.host.Network(), filtered)
+	dht.addH3ToPBPeers(resp.ProviderPeers)
 
 	// Also send closest dht servers we know about.
 	closestPeers := dht.closestPeersToQuery(pmes, p, dht.bucketSize)
 	if closestPeers != nil {
 		infos := peerstore.AddrInfos(dht.peerstore, closestPeers)
 		resp.CloserPeers = pb.PeerInfosToPBPeers(dht.host.Network(), infos)
+		dht.addH3ToPBPeers(resp.CloserPeers)
 	}
 
 	return resp, nil

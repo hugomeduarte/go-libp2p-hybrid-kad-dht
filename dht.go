@@ -171,16 +171,16 @@ type IpfsDHT struct {
 
 	// Node dual identity for privacy-preserving location-based routing
 	// nodeID: 256-bit identifier (stored in self/selfKey, libp2p Kademlia uses 256-bit keyspace)
-	h3Actual  h3.Cell // H3 cell at resolution 12 (actual location, ~100m precision)
-	h3Public  h3.Cell // H3 cell at resolution 7 (published, ~5km precision)
-	kAnonymity int    // target k value for k-anonymity (default: 50)
+	h3Actual   h3.Cell // H3 cell at resolution 12 (actual location, ~100m precision)
+	h3Public   h3.Cell // H3 cell at resolution 7 (published, ~5km precision)
+	kAnonymity int     // target k value for k-anonymity (default: 50)
 
 	// H3 Geographic Awareness for Hybrid Routing
-	h3Enabled    bool                  // Whether H3 is enabled
-	h3PeerStore  map[peer.ID]h3.Cell  // Map peer → H3 public cell (stores peer locations)
-	h3Mutex      sync.RWMutex          // Protects h3PeerStore map
-	h3Alpha      float64               // Weight for XOR distance in hybrid calculation (default: 0.6)
-	h3Beta        float64               // Weight for geographic distance in hybrid calculation (default: 0.4)
+	h3Enabled   bool                // Whether H3 is enabled
+	h3PeerStore map[peer.ID]h3.Cell // Map peer → H3 public cell (stores peer locations)
+	h3Mutex     sync.RWMutex        // Protects h3PeerStore map
+	h3Alpha     float64             // Weight for XOR distance in hybrid calculation (default: 0.6)
+	h3Beta      float64             // Weight for geographic distance in hybrid calculation (default: 0.4)
 }
 
 // Assert that IPFS assumptions about interfaces aren't broken. These aren't a
@@ -270,6 +270,24 @@ func New(ctx context.Context, h host.Host, options ...Option) (*IpfsDHT, error) 
 		dht.runFixLowPeersLoop()
 	}
 
+	// Start k-anonymity check after routing table is populated
+	if dht.h3Enabled && dht.h3Public != 0 {
+		dht.wg.Add(1)
+		go func() {
+			defer dht.wg.Done()
+			// Wait a bit for routing table to populate
+			select {
+			case <-time.After(30 * time.Second):
+			case <-dht.ctx.Done():
+				return
+			}
+			// Check k-anonymity asynchronously
+			if err := dht.ensureKAnonymity(dht.ctx); err != nil {
+				logger.Warnw("failed to ensure k-anonymity", "error", err)
+			}
+		}()
+	}
+
 	return dht, nil
 }
 
@@ -334,10 +352,10 @@ func makeDHT(ctx context.Context, h host.Host, cfg dhtcfg.Config) (*IpfsDHT, err
 		enableOptProv:   cfg.EnableOptimisticProvide,
 		optProvJobsPool: nil,
 		kAnonymity:      cfg.KAnonymity,
-		h3Enabled:        cfg.H3Enabled,
-		h3PeerStore:      make(map[peer.ID]h3.Cell),
-		h3Alpha:          cfg.H3Alpha,
-		h3Beta:           cfg.H3Beta,
+		h3Enabled:       cfg.H3Enabled,
+		h3PeerStore:     make(map[peer.ID]h3.Cell),
+		h3Alpha:         cfg.H3Alpha,
+		h3Beta:          cfg.H3Beta,
 	}
 
 	// Initialize H3 dual identity if location is provided
@@ -801,7 +819,7 @@ func (dht *IpfsDHT) FindLocal(ctx context.Context, id peer.ID) peer.AddrInfo {
 func (dht *IpfsDHT) closestPeersToQuery(pmes *pb.Message, from peer.ID, count int) []peer.ID {
 	// Get count+1 closest peers to target key, so that we can filter out 'from'
 	// (and potentially 'self' if it somehow appears) and still return 'count' peers.
-	closestPeers := dht.routingTable.NearestPeers(kb.ConvertKey(string(pmes.GetKey())), count+1)
+	closestPeers := dht.getClosestPeersHybrid(string(pmes.GetKey()), count+1)
 
 	if len(closestPeers) == 0 {
 		logger.Infow("no closer peers to send", from)
@@ -1003,198 +1021,4 @@ func (dht *IpfsDHT) filterAddrs(addrs []ma.Multiaddr) []ma.Multiaddr {
 		return f(addrs)
 	}
 	return addrs
-}
-
-// NodeIdentity returns the node's dual identity information.
-// This includes the nodeID (256-bit libp2p Kademlia identifier), h3_actual, h3_public, and k_anonymity.
-func (dht *IpfsDHT) NodeIdentity() (nodeID peer.ID, h3Actual, h3Public h3.Cell, kAnonymity int) {
-	return dht.self, dht.h3Actual, dht.h3Public, dht.kAnonymity
-}
-
-// H3Actual returns the node's actual H3 cell at resolution 12 (~100m precision).
-func (dht *IpfsDHT) H3Actual() h3.Cell {
-	return dht.h3Actual
-}
-
-// H3Public returns the node's public H3 cell at resolution 7 (~5km precision).
-// This is the location published to the network for privacy-preserving routing.
-func (dht *IpfsDHT) H3Public() h3.Cell {
-	return dht.h3Public
-}
-
-// KAnonymity returns the target k value for k-anonymity privacy guarantee.
-func (dht *IpfsDHT) KAnonymity() int {
-	return dht.kAnonymity
-}
-
-// computeH3Public computes the h3_public cell from h3_actual by reducing resolution.
-// It starts at resolution 7 and may reduce further if needed to meet k-anonymity requirements.
-func (dht *IpfsDHT) computeH3Public() (h3.Cell, error) {
-	if dht.h3Actual == 0 {
-		return 0, nil
-	}
-	// Start with resolution 7 (~5km precision)
-	h3Public, err := dht.h3Actual.Parent(7)
-	if err != nil {
-		return 0, err
-	}
-	return h3Public, nil
-}
-
-// ensureKAnonymity ensures that the h3_public cell meets the k-anonymity requirement.
-// If the current h3_public cell has fewer than k nodes, it reduces the resolution
-// (making the cell larger) until the requirement is met.
-// This function queries the network to count nodes in the same h3_public cell.
-func (dht *IpfsDHT) ensureKAnonymity(ctx context.Context) error {
-	if dht.h3Public == 0 {
-		return nil // No H3 location configured
-	}
-
-	// Start with resolution 7
-	resolution := 7
-	h3Public := dht.h3Public
-
-	// Try to find nodes in the same h3_public cell
-	// We'll query the routing table and network to count nodes
-	for resolution >= 0 {
-		// Count nodes in the same h3_public cell from routing table
-		count := dht.countNodesInH3Cell(ctx, h3Public)
-
-		if count >= dht.kAnonymity {
-			// Privacy guarantee met
-			dht.h3Public = h3Public
-			logger.Debugw("k-anonymity requirement met", "h3_public", h3Public, "count", count, "k", dht.kAnonymity, "resolution", resolution)
-			return nil
-		}
-
-		// If we haven't met k-anonymity, reduce resolution (make cell larger)
-		if resolution > 0 {
-			resolution--
-			var err error
-			h3Public, err = dht.h3Actual.Parent(resolution)
-			if err != nil {
-				logger.Errorw("failed to reduce H3 resolution", "error", err, "resolution", resolution)
-				break
-			}
-			logger.Debugw("reducing H3 resolution for k-anonymity", "new_resolution", resolution, "count", count, "k", dht.kAnonymity)
-		} else {
-			// Can't reduce further, log warning
-			logger.Warnw("unable to meet k-anonymity requirement", "h3_public", h3Public, "count", count, "k", dht.kAnonymity, "resolution", resolution)
-			dht.h3Public = h3Public
-			return nil
-		}
-	}
-
-	return nil
-}
-
-// countNodesInH3Cell counts the number of nodes in the routing table that share
-// the same h3_public cell. This is a simplified version - in a full implementation,
-// you would query the network to get accurate counts.
-func (dht *IpfsDHT) countNodesInH3Cell(ctx context.Context, h3Cell h3.Cell) int {
-	// For now, we'll count from the routing table
-	// In a full implementation, you would:
-	// 1. Query the DHT for nodes in the same h3_public cell
-	// 2. Maintain a registry of nodes per h3_public cell
-	// 3. Periodically refresh this count
-
-	peers := dht.routingTable.ListPeers()
-	count := 0
-
-	// Note: In a real implementation, you would need to store and retrieve
-	// h3_public information for each peer. This is a placeholder that counts
-	// all peers in the routing table. A full implementation would require:
-	// - Storing h3_public in peer metadata
-	// - Querying peers for their h3_public values
-	// - Maintaining a map of h3_public cells to node counts
-
-	_ = peers // Placeholder - actual implementation would check each peer's h3_public
-
-	// For demonstration, return a count that assumes we need to query the network
-	// In practice, this would be implemented by querying the DHT for nodes
-	// that advertise the same h3_public cell
-	return count
-}
-
-// Hybrid distance calculation functions for location-aware routing
-
-// hybridDistance calculates a combined distance using both XOR (network topology)
-// and geographic (H3 cell) distance. This enables location-aware routing decisions.
-// Returns: alpha × XOR_distance + beta × geo_distance
-func (dht *IpfsDHT) hybridDistance(peerID peer.ID, targetKey string) float64 {
-	if !dht.h3Enabled {
-		// H3 disabled, use only XOR distance (normal Kademlia behavior)
-		return dht.xorDistanceNormalized(peerID, targetKey)  //TODO: MAYBE REMOVE SINCE IF NOT ENABLED CAN USE DEFAULT KAMDELIA
-	}
-
-	// XOR component (network topology distance)
-	xorDist := dht.xorDistanceNormalized(peerID, targetKey)
-
-	// Geographic component (H3 cell distance)
-	geoDist := 0.5 // Default if no H3 info available
-	dht.h3Mutex.RLock()
-	if peerCell, ok := dht.h3PeerStore[peerID]; ok && dht.h3Public != 0 {
-		dist, err := dht.h3Public.GridDistance(peerCell)
-		if err == nil && dist < 10000 {
-			// Normalize: closer cells = smaller distance (0-1 range)
-			geoDist = float64(dist) / 10000.0
-		}
-	}
-	dht.h3Mutex.RUnlock()
-
-	// Weighted combination: hybrid = alpha×XOR + beta×geo
-	return dht.h3Alpha*xorDist + dht.h3Beta*geoDist
-}
-
-// xorDistanceNormalized converts Kademlia's XOR distance to a normalized value [0, 1].
-// 0 = very far, 1 = very close (based on common prefix length).
-func (dht *IpfsDHT) xorDistanceNormalized(peerID peer.ID, targetKey string) float64 {
-	peerKadID := kb.ConvertPeerID(peerID)
-	targetKadID := kb.ConvertKey(targetKey)
-
-	// Calculate common prefix length (CPL) - how many leading bits match
-	// Higher CPL = closer in keyspace
-	cpl := kb.CommonPrefixLen(peerKadID, targetKadID)
-
-	// Normalize: more common prefix = closer (higher value)
-	// 256-bit keyspace, so max CPL = 256
-	return float64(cpl) / 256.0
-}
-
-// StoreH3Cell stores a peer's H3 public cell in the peer store.
-// This is called when we learn about a peer's location (from protocol messages, queries, etc.).
-func (dht *IpfsDHT) StoreH3Cell(p peer.ID, cell h3.Cell) {
-	if !dht.h3Enabled || cell == 0 {
-		return
-	}
-
-	dht.h3Mutex.Lock()
-	defer dht.h3Mutex.Unlock()
-
-	dht.h3PeerStore[p] = cell
-	logger.Debugw("stored peer H3 cell", "peer", p, "h3_cell", cell)
-}
-
-// GetH3Cell retrieves a peer's H3 public cell from the peer store.
-// Returns (cell, true) if found, (0, false) if not found or H3 disabled.
-func (dht *IpfsDHT) GetH3Cell(p peer.ID) (h3.Cell, bool) {
-	if !dht.h3Enabled {
-		return h3.Cell(0), false
-	}
-
-	dht.h3Mutex.RLock()
-	defer dht.h3Mutex.RUnlock()
-
-	cell, ok := dht.h3PeerStore[p]
-	return cell, ok
-}
-
-// IsH3Enabled returns whether H3 geographic awareness is enabled.
-func (dht *IpfsDHT) IsH3Enabled() bool {
-	return dht.h3Enabled
-}
-
-// GetH3Weights returns the current alpha (XOR) and beta (geographic) weights.
-func (dht *IpfsDHT) GetH3Weights() (alpha, beta float64) {
-	return dht.h3Alpha, dht.h3Beta
 }
